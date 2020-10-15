@@ -964,10 +964,6 @@ class ConfigPanel(JPanel, ActionListener):
         self.log = log
         self.log_table = None # to be set by caller
         try:
-            self.repo = callbacks.loadExtensionSetting("git_repo")
-        except:
-            self.repo = ""
-        try:
             self.email = callbacks.loadExtensionSetting("git_email")
         except:
             self.email = ""
