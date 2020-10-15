@@ -6,7 +6,7 @@ items via git. Users can right-click supported items in Burp to send them to
 a git repo and use the Git Bridge tab to send items back to their respective 
 Burp tools.
 
-For more information see https://github.com/jfoote/burp-git-bridge.
+For more information see https://github.com/mateodurante/burp-git-bridge.
 
 This extension is a PoC. Right now only Repeater and Scanner are supported, 
 and the code could use refactoring. If you're interested in a more polished 
@@ -14,18 +14,17 @@ version or more features let me know, or better yet consider sending me a pull r
 
 Thanks for checking it out.
 
-Jonathan Foote 
-jmfoote@loyola.edu
-2015-04-21
+Writer: Jonathan Foote 2015-04-21
+Editor: Mateo Durante 2020-10-15
 '''
 
-from burp import IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IScanIssue, IHttpService, IHttpRequestResponse
+from burp import IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IScanIssue, IHttpService, IHttpRequestResponse, IBurpExtenderCallbacks
 from java.awt import Component
 from java.awt.event import ActionListener
 from java.io import PrintWriter
 from java.util import ArrayList, List
 from java.net import URL
-from javax.swing import JScrollPane, JSplitPane, JTabbedPane, JTable, SwingUtilities, JPanel, JButton, JLabel, JMenuItem, BoxLayout
+from javax.swing import JScrollPane, JSplitPane, JTabbedPane, JTable, SwingUtilities, JPanel, JButton, JLabel, JMenuItem, BoxLayout, Box, JTextField
 from javax.swing.table import AbstractTableModel
 from threading import Lock
 import datetime, os, hashlib
@@ -49,6 +48,18 @@ class BurpExtender(IBurpExtender):
         sys.stderr = callbacks.getStderr()
         callbacks.setExtensionName("Git Bridge")
         
+        # import time
+        # print(dir(callbacks))
+        # print(callbacks.loadConfigFromJson())
+        # for fn in dir(callbacks):
+        #     if fn not in ['unloadExtension'] and not 'out' in fn:
+        #         try:
+        #             # print(fn, getattr(callbacks, fn)())
+        #             print(fn, getattr(callbacks, fn))
+        #             time.sleep(2)
+        #         except:
+        #             pass
+
 
         # Create major objects and load user data 
 
@@ -144,6 +155,7 @@ class Log():
                 url=str(self._helpers.analyzeRequest(messageInfo).getUrl()), 
                 timestamp=timestamp,
                 who=self.git_log.whoami(),
+                description='',
                 request=messageInfo.getRequest(),
                 response=messageInfo.getResponse())
         self.gui_log.add_entry(entry)
@@ -180,6 +192,7 @@ class Log():
         entry = LogEntry(tool="scanner",
                 timestamp=timestamp,
                 who=self.git_log.whoami(),
+                description='',
                 messages=messages,
                 host=service.getHost(), 
                 port=service.getPort(), 
@@ -205,6 +218,35 @@ class Log():
         self.git_log.remove(entry)
         self.gui_log.remove_entry(entry) 
 
+    def pull(self):
+        '''
+        pulls the supplied entry from the Log
+        '''
+        self.git_log.pull()
+
+    def push(self):
+        '''
+        Pushs the supplied entry from the Log
+        '''
+        self.git_log.push()
+
+    def set_config(self, user, mail, repo):
+        '''
+        Set the supplied data to git config
+        '''
+        self.git_log.set_config(user, mail, repo)
+
+    def delete_repo_local(self, repo):
+        '''
+        Set the supplied data to git config
+        '''
+        self.git_log.delete_repo_local(repo)
+
+    def set_description(self, entry_hash, description):
+        '''
+        Set the supplied data to git config
+        '''
+        self.git_log.set_description(entry_hash, description)
 
 class GuiLog(AbstractTableModel):
     '''
@@ -222,6 +264,13 @@ class GuiLog(AbstractTableModel):
         self._lock = Lock()
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
+
+        self.cols = ["Time added", 
+                "Tool",
+                "URL",
+                "Issue",
+                "Who",
+                "Description"]
 
     def clear(self):
         '''
@@ -277,20 +326,15 @@ class GuiLog(AbstractTableModel):
         Used by the Java Swing UI 
         '''
 
-        return 5
+        return len(self.cols)
     
     def getColumnName(self, columnIndex):
         '''
         Used by the Java Swing UI 
         '''
 
-        cols = ["Time added", 
-                "Tool",
-                "URL",
-                "Issue",
-                "Who"]
         try:
-            return cols[columnIndex]
+            return self.cols[columnIndex]
         except KeyError:
             return ""
 
@@ -319,6 +363,8 @@ class GuiLog(AbstractTableModel):
                 return "N/A"
         elif columnIndex == 4:
             return logEntry.who
+        elif columnIndex == 5:
+            return logEntry.description
 
         return ""
 
@@ -332,18 +378,81 @@ class GitLog(object):
 
     def __init__(self, callbacks):
         '''
-        Creates the git repo if it doesn't exist
+        Initializes git repo config
         '''
 
         self.callbacks = callbacks
+        self.repo_path = None
 
-        # Set directory paths and if necessary, init git repo
+        self.home = os.path.expanduser("~")
+        self.base_path = os.path.join(self.home, ".burp-git-bridge/")
+        if not os.path.exists(self.base_path):
+            os.makedirs(self.base_path)
 
-        home = os.path.expanduser("~")
-        self.repo_path = os.path.join(home, ".burp-git-bridge")
+        self.burp_config_path = os.path.join(self.home, ".java/.userPrefs/burp/prefs.xml")
+        self.project_repo_path = os.path.join(self.base_path, "repo_path_relations.txt")
+        # if not os.path.exists(self.repo_path):
+        #     self._run_subprocess_command(["git", "init", self.repo_path], cwd=home)
 
-        if not os.path.exists(self.repo_path):
-            subprocess.check_call(["git", "init", self.repo_path], cwd=home)
+        # Load project-repo relations
+        self.project_repo_rels = {}
+        if os.path.exists(self.project_repo_path):
+            with open(self.project_repo_path, "r") as f:
+                for line in f.read().split('\n'):
+                    try:
+                        proj_name, repo = line.split(',')
+                        self.project_repo_rels[proj_name] = repo
+                    except Exception as e:
+                        print("Cannot be unpacked file project_repo_path in line {}".format(line))
+
+        # Load actual project name. If it is temporary project loads lastone. can it be hacked better?
+        try:
+            # TODO: This can be better, right?
+            with open(self.burp_config_path, "r") as f:
+                config = f.read().split('\n')
+                for line in config:
+                    if 'suite.recentProjectFiles0' in line:
+                        self.project_path = line.split('value="')[1].split('"/>')[0]
+                    if 'suite.recentProjectNames0' in line:
+                        self.project_name = line.split('value="')[1].split('"/>')[0]
+        except:
+            self.project_name = None
+            self.project_path = None
+        
+        if self.project_name in self.project_repo_rels.keys():
+            self.repo_uri = self.project_repo_rels[self.project_name]
+            self.repo_path = self._generate_path_repo_name(self._extract_repo_name(self.repo_uri))
+        else:
+            self.repo_uri = None
+        
+        print("Loaded project {}\nProject path {}\nRepo uri {}".format(self.project_name, self.project_path, self.repo_uri))
+
+    def save_current_project_repo(self):
+        print("saving project_repo_rels file project {} with repo {}".format(self.project_name, self.repo_uri))
+        self.project_repo_rels[self.project_name] = self.repo_uri
+        lines = '\n'.join(['{},{}'.format(k,v) for k, v in self.project_repo_rels.items()])
+        with open(self.project_repo_path, "w") as f:
+            f.write(lines)
+
+    def _run_subprocess_command(self, cmd_list, cwd=None):
+        process = subprocess.Popen(cmd_list, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = process.communicate()
+        print("Subprocess: {}".format(cmd_list))
+        print(out)
+        print(err)
+        if process.returncode != 0:
+            print("########### Error on call: {}".format(cmd_list))
+            print(out)
+            print(err)
+            print("########### End Error on call")
+            raise Exception("Error on call: {}".format(cmd_list))
+        return out
+
+    def _generate_path_repo_name(self, repo_name):
+        return os.path.join(self.base_path, repo_name)
+
+    def _extract_repo_name(self, repo_uri):
+        return repo_uri.split('/')[-1].split('.git')[0]
 
     def add_repeater_entry(self, entry):
         '''
@@ -359,7 +468,7 @@ class GitLog(object):
         # Add and commit repeater data to git repo
 
         self.write_entry(entry, entry_dir)
-        subprocess.check_call(["git", "commit", "-m", "Added Repeater entry"], 
+        self._run_subprocess_command(["git", "commit", "-m", "Added Repeater entry"], 
                 cwd=self.repo_path)
 
     def add_scanner_entry(self, entry):
@@ -382,7 +491,7 @@ class GitLog(object):
             os.mkdir(messages_dir)
             lpath = os.path.join(messages_dir, ".burp-list")
             open(lpath, "wt")
-            subprocess.check_call(["git", "add", lpath], cwd=self.repo_path)
+            self._run_subprocess_command(["git", "add", lpath], cwd=self.repo_path)
         i = 0
         for message in messages:
             message_dir = os.path.join(messages_dir, str(i))
@@ -391,7 +500,7 @@ class GitLog(object):
             self.write_entry(message, message_dir)
             i += 1
 
-        subprocess.check_call(["git", "commit", "-m", "Added scanner entry"], 
+        self._run_subprocess_command(["git", "commit", "-m", "Added scanner entry"], 
                 cwd=self.repo_path)
 
 
@@ -411,8 +520,7 @@ class GitLog(object):
             with open(path, "wb") as fp:
                 fp.write(data)
                 fp.flush()
-                fp.close()
-            subprocess.check_call(["git", "add", path], 
+            self._run_subprocess_command(["git", "add", path], 
                     cwd=self.repo_path)
 
 
@@ -458,14 +566,15 @@ class GitLog(object):
 
         # Process each of the directories in the underlying git repo 
 
-        for entry_dir in os.listdir(self.repo_path):
-            if entry_dir == ".git":
-                continue
-            entry_path = os.path.join(self.repo_path, entry_dir)
-            if not os.path.isdir(entry_path):
-                continue
-            entry = load_entry(entry_path)
-            yield entry
+        if self.repo_path:
+            for entry_dir in os.listdir(self.repo_path):
+                if entry_dir == ".git":
+                    continue
+                entry_path = os.path.join(self.repo_path, entry_dir)
+                if not os.path.isdir(entry_path):
+                    continue
+                entry = load_entry(entry_path)
+                yield entry
 
 
     def whoami(self):
@@ -474,7 +583,7 @@ class GitLog(object):
         created or modified an entry.
         '''
 
-        return subprocess.check_output(["git", "config", "user.name"], 
+        return self._run_subprocess_command(["git", "config", "user.name"], 
                 cwd=self.repo_path)
 
     def remove(self, entry):
@@ -482,10 +591,86 @@ class GitLog(object):
         Removes the given LogEntry from the underlying git repo.
         '''
         entry_path = os.path.join(self.repo_path, entry.md5)
-        subprocess.check_output(["git", "rm", "-rf", entry_path], 
+        self._run_subprocess_command(["git", "rm", "-rf", entry_path], 
            cwd=self.repo_path)
-        subprocess.check_call(["git", "commit", "-m", "Removed entry at %s" % 
+        self._run_subprocess_command(["git", "commit", "-m", "Removed entry at %s" % 
             entry_path], cwd=self.repo_path)
+
+    def pull(self):
+        '''
+        pulles the actual state from the underlying git repo.
+        '''
+        self._run_subprocess_command(["git", "pull"], cwd=self.repo_path)
+
+    def push(self):
+        '''
+        Pushes the actual state from the underlying git repo.
+        '''
+        print(self._run_subprocess_command(["git", "pull"], cwd=self.repo_path))
+        print(self._run_subprocess_command(["git", "push", "origin", "master"], cwd=self.repo_path))
+
+    def set_config(self, user, email, repo_uri):
+        '''
+        Set the supplied data to git config
+        '''
+        self.repo_name = self._extract_repo_name(repo_uri)
+        self.repo_path = self._generate_path_repo_name(self.repo_name)
+        self.repo_uri = repo_uri
+        self.user = user
+        self.email = email
+
+        server = repo_uri.split('@')[1].split(':')[0]
+        keys = self._run_subprocess_command(["ssh-keyscan", server]).decode()
+        hosts_file = os.path.join(self.home, ".ssh/known_hosts")
+
+        with open(hosts_file, "r") as f:
+            lines = f.read().split('\n')
+        
+        for k in keys.split('\n'):
+            if not k in lines:
+                lines.append(k)
+
+        with open(hosts_file, "w") as f:
+            f.write('\n'.join(lines))
+
+        self._run_subprocess_command(["git", "config", "--global", "user.name", user], cwd=self.base_path)
+        self._run_subprocess_command(["git", "config", "--global", "user.email", email], cwd=self.base_path)
+        
+        if not os.path.exists(self.repo_path):
+            self._run_subprocess_command(["git", "clone", repo_uri, self.repo_name], cwd=self.base_path)
+        
+        self.save_current_project_repo()
+
+    def delete_repo_local(self, repo_uri):
+        '''
+        Deletes local repo_uri folder.
+        '''
+        repo_name = self._extract_repo_name(repo_uri)
+        self._run_subprocess_command(["rm", "-rf", repo_name], cwd=self.base_path)
+
+    def set_description(self, entry_hash, description):
+        '''
+        Set description data in local repo folder, commit and push.
+        '''
+        entry_path = os.path.join(self.repo_path, entry_hash)
+        who_file = os.path.join(entry_path, 'who')
+        description_file = os.path.join(entry_path, 'description')
+        
+        with open(who_file, "r") as f:
+            who = f.read()
+        
+        if who != self.whoami():
+            print("You cannot edit description entry that you not created (check 'who' field)")
+            return False
+
+        with open(description_file, 'w') as f:
+            f.write(description)
+                
+        self._run_subprocess_command(["git", "add", description_file], 
+                cwd=self.repo_path)
+        self._run_subprocess_command(["git", "commit", "-m", "Edited description entry"], 
+                        cwd=self.repo_path)
+        self.push()
 
 
 
@@ -606,8 +791,12 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
     '''
 
     def __init__(self, callbacks, log):
+        self.configPanel = ConfigPanel(callbacks, log)
+        self.addTab("Git Config", self.configPanel)
         self.commandPanel = CommandPanel(callbacks, log)
-        self.addTab("Git Bridge Commands", self.commandPanel)
+        self.addTab("Git Commands", self.commandPanel)
+        self.editPanel = EntryEditPanel(callbacks, log)
+        # self.addTab("Entry edit", self.editPanel)
         self._requestViewer = callbacks.createMessageEditor(self, False)
         self._responseViewer = callbacks.createMessageEditor(self, False)
         self._issueViewer = callbacks.createMessageEditor(self, False)
@@ -619,6 +808,8 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
         the selected rows
         '''
         self.commandPanel.log_table = log_table
+        self.editPanel.log_table = log_table
+        self.configPanel.log_table = log_table
 
     def show_log_entry(self, log_entry):
         '''
@@ -626,7 +817,9 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
         '''
 
         self.removeAll()
-        self.addTab("Git Bridge Commands", self.commandPanel)
+        self.addTab("Git Config", self.configPanel)
+        self.addTab("Git Commands", self.commandPanel)
+        self.addTab("Entry Edit", self.editPanel)
         if getattr(log_entry, "request", False):
             self.addTab("Request", self._requestViewer.getComponent())
             self._requestViewer.setMessage(log_entry.request, True)
@@ -708,6 +901,151 @@ class UiLogTable(JTable):
         JTable.changeSelection(self, row, col, toggle, extend)
         self.bottom_pane.show_log_entry(self.gui_log.get(row))
 
+class EntryEditPanel(JPanel, ActionListener):
+    '''
+    This is the "Entry Edit" Panel shown in the bottom of the Git
+    Bridge tab.
+    '''
+
+    def __init__(self, callbacks, log):
+        self.callbacks = callbacks
+        self.log = log
+        self.log_table = None # to be set by caller
+
+        self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
+
+        boxHorizontal = Box.createHorizontalBox()
+        button = JButton("Set new description")
+        boxHorizontal.add(JLabel("Set new description to selected items. Only edits if you are who created them."))
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
+        button = JButton("Set new description")
+        self.description_box = JTextField('', 10)
+        self.description_box.setText('')
+        button.addActionListener(EntryEditPanel.SetDescriptionAction(self, log, self.description_box))
+        boxHorizontal.add(JLabel("  New description: "))
+        boxHorizontal.add(self.description_box)
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
+
+    class SetDescriptionAction(ActionListener):
+        '''
+        Iterates over each entry that is selected in the UI table and 
+        set description to and from the Log. 
+        '''
+
+        def __init__(self, panel, log, description_box):
+            self.panel = panel
+            self.log = log
+            self.description_box = description_box
+    
+        def actionPerformed(self, event):
+            '''
+            Iterates over each entry that is selected in the UI table and 
+            removes it from the Log. 
+            '''
+            entries = self.panel.log_table.getSelectedEntries()
+            for entry in entries:
+                self.log.set_description(entry.md5, self.description_box.getText())
+            
+            self.log.reload()
+
+
+
+class ConfigPanel(JPanel, ActionListener):
+    '''
+    This is the "Git Bridge Commands" Panel shown in the bottom of the Git
+    Bridge tab.
+    '''
+
+    def __init__(self, callbacks, log):
+        self.callbacks = callbacks
+        self.log = log
+        self.log_table = None # to be set by caller
+        try:
+            self.repo = callbacks.loadExtensionSetting("git_repo")
+        except:
+            self.repo = ""
+        try:
+            self.email = callbacks.loadExtensionSetting("git_email")
+        except:
+            self.email = ""
+        try:
+            self.name = callbacks.loadExtensionSetting("git_name")
+        except:
+            self.name = ""
+
+        self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
+
+
+        boxHorizontal = Box.createHorizontalBox()
+        self.user_box = JTextField('', 10)
+        self.user_box.setText(self.name)
+        boxHorizontal.add(JLabel("  user.name: "))
+        boxHorizontal.add(self.user_box)
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
+        self.email_box = JTextField('', 10)
+        self.email_box.setText(self.email)
+        boxHorizontal.add(JLabel("  user.email: "))
+        boxHorizontal.add(self.email_box)
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
+        self.repo_box = JTextField('', 10)
+        self.repo_box.setText(self.repo)
+        boxHorizontal.add(JLabel("  Git Repo: "))
+        boxHorizontal.add(self.repo_box)
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
+        button = JButton("Set and Reload")
+        button.addActionListener(ConfigPanel.SetConfigAction(log, callbacks, self.user_box, self.email_box, self.repo_box))
+        boxHorizontal.add(JLabel("Set, save and reload values:"))
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
+        button = JButton("Delete")
+        button.addActionListener(ConfigPanel.DeleteAction(log, self.repo_box))
+        boxHorizontal.add(JLabel("Delete repo locally to clone again later (will lose all changes):"))
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
+
+    class SetConfigAction(ActionListener):
+        '''
+        Handles when the "SetConfig" button is clicked.
+        '''
+
+        def __init__(self, log, callbacks, userBox, emailBox, repoBox):
+            self.log = log
+            self.callbacks = callbacks
+            self.user_box = userBox
+            self.email_box = emailBox
+            self.repo_box = repoBox
+    
+        def actionPerformed(self, event):
+            self.repo = self.callbacks.saveExtensionSetting("git_repo", self.repo_box.getText())
+            self.email = self.callbacks.saveExtensionSetting("git_email", self.email_box.getText())
+            self.name = self.callbacks.saveExtensionSetting("git_name", self.user_box.getText())
+            self.log.set_config(self.user_box.getText(), self.email_box.getText(), self.repo_box.getText())
+            self.log.reload()
+
+    class DeleteAction(ActionListener):
+        '''
+        Handles when the "Delete" button is clicked.
+        '''
+
+        def __init__(self, log, repoBox):
+            self.log = log
+            self.repo_box = repoBox
+    
+        def actionPerformed(self, event):
+            self.log.delete_repo_local(self.repo_box.getText())
+
+
 class CommandPanel(JPanel, ActionListener):
     '''
     This is the "Git Bridge Commands" Panel shown in the bottom of the Git
@@ -721,25 +1059,48 @@ class CommandPanel(JPanel, ActionListener):
 
         self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
 
+        boxHorizontal = Box.createHorizontalBox()
         label = JLabel("Reload from Git Repo:")
         button = JButton("Reload")
         button.addActionListener(CommandPanel.ReloadAction(log))
-        self.add(label)
-        self.add(button)
+        boxHorizontal.add(label)
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
 
+        boxHorizontal = Box.createHorizontalBox()
         label = JLabel("Send selected entries to respective Burp tools:")
         button = JButton("Send")
         button.addActionListener(CommandPanel.SendAction(self))
-        self.add(label)
-        self.add(button)
+        boxHorizontal.add(label)
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
 
+        boxHorizontal = Box.createHorizontalBox()
         label = JLabel("Remove selected entries from Git Repo:")
         button = JButton("Remove")
         button.addActionListener(CommandPanel.RemoveAction(self, log))
-        self.add(label)
-        self.add(button)
+        boxHorizontal.add(label)
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
 
         # TODO: maybe add a git command box
+        
+
+        boxHorizontal = Box.createHorizontalBox()
+        label = JLabel("Pull to Git Repo:")
+        button = JButton("Pull")
+        button.addActionListener(CommandPanel.PullAction(log, callbacks))
+        boxHorizontal.add(label)
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
+        label = JLabel("Push to Git Repo:")
+        button = JButton("Push")
+        button.addActionListener(CommandPanel.PushAction(log, callbacks))
+        boxHorizontal.add(label)
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
 
     class ReloadAction(ActionListener):
         '''
@@ -778,7 +1139,7 @@ class CommandPanel(JPanel, ActionListener):
 
     class RemoveAction(ActionListener):
         '''
-        Handles when the "Send to Tools" button is clicked.
+        Handles when the "Remove" button is clicked.
         '''
 
         def __init__(self, panel, log):
@@ -793,6 +1154,31 @@ class CommandPanel(JPanel, ActionListener):
             entries = self.panel.log_table.getSelectedEntries()
             for entry in entries:
                 self.log.remove(entry)
+
+    class PullAction(ActionListener):
+        '''
+        Handles when the "Pull to repo" button is clicked.
+        '''
+
+        def __init__(self, log, callbacks):
+            self.log = log
+            self._callbacks = callbacks
+    
+        def actionPerformed(self, event):
+            self.log.pull()
+            self.log.reload()
+            
+    class PushAction(ActionListener):
+        '''
+        Handles when the "Push to repo" button is clicked.
+        '''
+
+        def __init__(self, log, callbacks):
+            self.log = log
+            self._callbacks = callbacks
+    
+        def actionPerformed(self, event):
+            self.log.push()
 
 
 '''
