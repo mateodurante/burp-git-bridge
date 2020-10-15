@@ -16,6 +16,10 @@ Thanks for checking it out.
 
 Writer: Jonathan Foote 2015-04-21
 Editor: Mateo Durante 2020-10-15
+
+This project needs:
+ - git
+ - xdotools
 '''
 
 from burp import IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IScanIssue, IHttpService, IHttpRequestResponse, IBurpExtenderCallbacks
@@ -234,12 +238,14 @@ class Log():
         '''
         Set the supplied data to git config
         '''
+        self.gui_log.clear()
         self.git_log.set_config(user, mail, repo)
 
     def delete_repo_local(self, repo):
         '''
         Set the supplied data to git config
         '''
+        self.gui_log.clear()
         self.git_log.delete_repo_local(repo)
 
     def set_description(self, entry_hash, description):
@@ -247,6 +253,19 @@ class Log():
         Set the supplied data to git config
         '''
         self.git_log.set_description(entry_hash, description)
+
+    def get_actual_repo_uri(self):
+        '''
+        Get actual repo uri
+        '''
+        return self.git_log.get_actual_repo_uri()
+
+    def reload_project(self):
+        '''
+        Reload config of burp project
+        '''
+        self.gui_log.clear()
+        self.git_log.reload_project()
 
 class GuiLog(AbstractTableModel):
     '''
@@ -393,7 +412,9 @@ class GitLog(object):
         self.project_repo_path = os.path.join(self.base_path, "repo_path_relations.txt")
         # if not os.path.exists(self.repo_path):
         #     self._run_subprocess_command(["git", "init", self.repo_path], cwd=home)
+        self.reload_project()
 
+    def reload_project(self):
         # Load project-repo relations
         self.project_repo_rels = {}
         if os.path.exists(self.project_repo_path):
@@ -406,18 +427,37 @@ class GitLog(object):
                         print("Cannot be unpacked file project_repo_path in line {}".format(line))
 
         # Load actual project name. If it is temporary project loads lastone. can it be hacked better?
-        try:
-            # TODO: This can be better, right?
-            with open(self.burp_config_path, "r") as f:
-                config = f.read().split('\n')
-                for line in config:
-                    if 'suite.recentProjectFiles0' in line:
-                        self.project_path = line.split('value="')[1].split('"/>')[0]
-                    if 'suite.recentProjectNames0' in line:
-                        self.project_name = line.split('value="')[1].split('"/>')[0]
-        except:
+        self.project_name = self.get_current_project_name()
+        if self.project_name == 'Temporary Project':
             self.project_name = None
             self.project_path = None
+        else:
+            try:
+                # TODO: This can be better, right?
+                with open(self.burp_config_path, "r") as f:
+                    config = f.read().split('\n')
+                    for line in config:
+                        if 'suite.recentProjectNames' in line and self.project_name in line:
+                            temp_project_id = line.split('suite.recentProjectNames')[1].split('" value="')[0]
+                            search = 'suite.recentProjectNames'+temp_project_id
+                            for line in config:
+                                if search in line:
+                                    self.project_path = line.split('value="')[1].split('"/>')[0]
+            except:
+                self.project_name = None
+                self.project_path = None
+        # try:
+        #     # TODO: This can be better, right?
+        #     with open(self.burp_config_path, "r") as f:
+        #         config = f.read().split('\n')
+        #         for line in config:
+        #             if 'suite.recentProjectFiles0' in line:
+        #                 self.project_path = line.split('value="')[1].split('"/>')[0]
+        #             if 'suite.recentProjectNames0' in line:
+        #                 self.project_name = line.split('value="')[1].split('"/>')[0]
+        # except:
+        #     self.project_name = None
+        #     self.project_path = None
         
         if self.project_name in self.project_repo_rels.keys():
             self.repo_uri = self.project_repo_rels[self.project_name]
@@ -434,19 +474,38 @@ class GitLog(object):
         with open(self.project_repo_path, "w") as f:
             f.write(lines)
 
-    def _run_subprocess_command(self, cmd_list, cwd=None):
+    def _run_subprocess_command(self, cmd_list, cwd=None, quiet=False):
         process = subprocess.Popen(cmd_list, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, err = process.communicate()
         print("Subprocess: {}".format(cmd_list))
-        print(out)
-        print(err)
-        if process.returncode != 0:
-            print("########### Error on call: {}".format(cmd_list))
+        if not quiet:
             print(out)
             print(err)
-            print("########### End Error on call")
+        if process.returncode != 0:
+            if not quiet:
+                print("########### Error on call: {}".format(cmd_list))
+                print(out)
+                print(err)
+                print("########### End Error on call")
             raise Exception("Error on call: {}".format(cmd_list))
         return out
+    
+    def get_current_project_name(self):
+        """
+        Extracts project name from window, uglyy right?
+        """
+        w = None
+        wids = self._run_subprocess_command(['xdotool', 'search', 'Burp'], quiet=True).decode()
+        for wid in wids.split('\n'):
+            try:
+                wname = self._run_subprocess_command(['xdotool', 'getwindowname', wid], quiet=True).decode()
+                if wname.startswith("Burp Suite Professional v"):
+                    w = wname
+            except:
+                pass
+        print(w)
+        if w:
+            return w.split(' - ')[1]
 
     def _generate_path_repo_name(self, repo_name):
         return os.path.join(self.base_path, repo_name)
@@ -672,6 +731,8 @@ class GitLog(object):
                         cwd=self.repo_path)
         self.push()
 
+    def get_actual_repo_uri(self):
+        return self.repo_uri
 
 
 '''
@@ -963,6 +1024,8 @@ class ConfigPanel(JPanel, ActionListener):
         self.callbacks = callbacks
         self.log = log
         self.log_table = None # to be set by caller
+        # self.log.reload()
+        self.repo = self.log.get_actual_repo_uri()
         try:
             self.email = callbacks.loadExtensionSetting("git_email")
         except:
@@ -974,6 +1037,7 @@ class ConfigPanel(JPanel, ActionListener):
 
         self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
 
+        to_disable = []
 
         boxHorizontal = Box.createHorizontalBox()
         self.user_box = JTextField('', 10)
@@ -1002,6 +1066,7 @@ class ConfigPanel(JPanel, ActionListener):
         boxHorizontal.add(JLabel("Set, save and reload values:"))
         boxHorizontal.add(button)
         self.add(boxHorizontal)
+        to_disable.append(button)
 
         boxHorizontal = Box.createHorizontalBox()
         button = JButton("Delete")
@@ -1009,6 +1074,23 @@ class ConfigPanel(JPanel, ActionListener):
         boxHorizontal.add(JLabel("Delete repo locally to clone again later (will lose all changes):"))
         boxHorizontal.add(button)
         self.add(boxHorizontal)
+        to_disable.append(button)
+
+        # to_disable.append(self.user_box)
+        # to_disable.append(self.email_box)
+        # to_disable.append(self.repo_box)
+        # for item in to_disable:
+        #     item.setVisible(False)
+        # self.revalidate()
+        # self.repaint()
+
+        # boxHorizontal = Box.createHorizontalBox()
+        # button = JButton("Reload Actual Project Config")
+        # button.addActionListener(ConfigPanel.ReloadActualProjectAction(log, self.repo_box, to_disable, self))
+        # boxHorizontal.add(JLabel("Because we cannot get actual project, maybe you want to reload:"))
+        # boxHorizontal.add(button)
+        # self.add(boxHorizontal)
+
 
     class SetConfigAction(ActionListener):
         '''
@@ -1027,7 +1109,7 @@ class ConfigPanel(JPanel, ActionListener):
             self.email = self.callbacks.saveExtensionSetting("git_email", self.email_box.getText())
             self.name = self.callbacks.saveExtensionSetting("git_name", self.user_box.getText())
             self.log.set_config(self.user_box.getText(), self.email_box.getText(), self.repo_box.getText())
-            self.log.reload()
+            self.log.reload_project()
 
     class DeleteAction(ActionListener):
         '''
@@ -1040,6 +1122,26 @@ class ConfigPanel(JPanel, ActionListener):
     
         def actionPerformed(self, event):
             self.log.delete_repo_local(self.repo_box.getText())
+
+
+    class ReloadActualProjectAction(ActionListener):
+        '''
+        Handles when the "ReloadActualProject" button is clicked.
+        '''
+
+        def __init__(self, log, repo_box, to_disable, panel):
+            self.log = log
+            self.repo_box = repo_box
+            self.to_disable = to_disable
+            self.panel = panel
+    
+        def actionPerformed(self, event):
+            self.log.reload_project()
+            self.repo_box.setText(self.log.get_actual_repo_uri())
+            for item in self.to_disable:
+                item.setVisible(True)
+            self.panel.revalidate()
+            self.panel.repaint()
 
 
 class CommandPanel(JPanel, ActionListener):
