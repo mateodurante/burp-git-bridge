@@ -506,7 +506,7 @@ class GitLog(object):
                 pass
         print(w)
         if w:
-            return w.split(' - ')[1]
+            return w.split(' - ')[1].strip()
 
     def _generate_path_repo_name(self, repo_name):
         return os.path.join(self.base_path, repo_name)
