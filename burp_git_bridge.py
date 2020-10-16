@@ -660,6 +660,7 @@ class GitLog(object):
         '''
         pulles the actual state from the underlying git repo.
         '''
+        self.add_key_to_know_hosts(self.repo_uri)
         self._run_subprocess_command(["git", "pull"], cwd=self.repo_path)
 
     def push(self):
@@ -667,18 +668,9 @@ class GitLog(object):
         Pushes the actual state from the underlying git repo.
         '''
         print(self._run_subprocess_command(["git", "pull"], cwd=self.repo_path))
-        print(self._run_subprocess_command(["git", "push", "origin", "master"], cwd=self.repo_path))
+        print(self._run_subprocess_command(["git", "push"], cwd=self.repo_path))
 
-    def set_config(self, user, email, repo_uri):
-        '''
-        Set the supplied data to git config
-        '''
-        self.repo_name = self._extract_repo_name(repo_uri)
-        self.repo_path = self._generate_path_repo_name(self.repo_name)
-        self.repo_uri = repo_uri
-        self.user = user
-        self.email = email
-
+    def add_key_to_know_hosts(self, repo_uri):
         server = repo_uri.split('@')[1].split(':')[0]
         keys = self._run_subprocess_command(["ssh-keyscan", server]).decode()
         hosts_file = os.path.join(self.home, ".ssh/known_hosts")
@@ -692,6 +684,19 @@ class GitLog(object):
 
         with open(hosts_file, "w") as f:
             f.write('\n'.join(lines))
+
+
+    def set_config(self, user, email, repo_uri):
+        '''
+        Set the supplied data to git config
+        '''
+        self.repo_name = self._extract_repo_name(repo_uri)
+        self.repo_path = self._generate_path_repo_name(self.repo_name)
+        self.repo_uri = repo_uri
+        self.user = user
+        self.email = email
+
+        self.add_key_to_know_hosts(repo_uri)
 
         self._run_subprocess_command(["git", "config", "--global", "user.name", user], cwd=self.base_path)
         self._run_subprocess_command(["git", "config", "--global", "user.email", email], cwd=self.base_path)
@@ -1111,6 +1116,7 @@ class ConfigPanel(JPanel, ActionListener):
             self.name = self.callbacks.saveExtensionSetting("git_name", self.user_box.getText())
             self.log.set_config(self.user_box.getText(), self.email_box.getText(), self.repo_box.getText())
             self.log.reload_project()
+            self.log.reload()
 
     class DeleteAction(ActionListener):
         '''
