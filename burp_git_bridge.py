@@ -428,7 +428,6 @@ class GitLog(object):
 
         # Load actual project name. If it is temporary project loads lastone. can it be hacked better?
         self.project_name = self.get_current_project_name()
-        self.project_name = None
         self.project_path = None
         if self.project_name == 'Temporary Project':
             self.project_name = None
