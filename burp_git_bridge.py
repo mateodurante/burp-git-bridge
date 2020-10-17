@@ -20,6 +20,7 @@ Editor: Mateo Durante 2020-10-15
 This project needs:
  - git
  - xdotools
+ - ssh
 '''
 
 from burp import IBurpExtender, ITab, IHttpListener, IMessageEditorController, IContextMenuFactory, IScanIssue, IHttpService, IHttpRequestResponse, IBurpExtenderCallbacks
@@ -650,6 +651,7 @@ class GitLog(object):
         '''
         Removes the given LogEntry from the underlying git repo.
         '''
+        self.pull()
         entry_path = os.path.join(self.repo_path, entry.md5)
         self._run_subprocess_command(["git", "rm", "-rf", entry_path], 
            cwd=self.repo_path)
@@ -727,6 +729,8 @@ class GitLog(object):
         if who != self.whoami():
             print("You cannot edit description entry that you not created (check 'who' field)")
             return False
+        
+        self.pull()
 
         with open(description_file, 'w') as f:
             f.write(description)
