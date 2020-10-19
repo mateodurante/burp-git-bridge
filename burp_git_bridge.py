@@ -261,6 +261,12 @@ class Log():
         '''
         return self.git_log.get_actual_repo_uri()
 
+    def get_key_pub(self):
+        '''
+        Get actual repo uri
+        '''
+        return self.git_log.get_key_pub()
+
     def reload_project(self):
         '''
         Reload config of burp project
@@ -413,6 +419,10 @@ class GitLog(object):
         self.project_repo_path = os.path.join(self.base_path, "repo_path_relations.txt")
         # if not os.path.exists(self.repo_path):
         #     self._run_subprocess_command(["git", "init", self.repo_path], cwd=home)
+        self.user = None
+        self.email = None
+        self.key_pub = self._get_key_pub()
+        
         self.reload_project()
 
     def reload_project(self):
@@ -638,14 +648,23 @@ class GitLog(object):
                 yield entry
 
 
-    def whoami(self):
+    def _whoami(self):
         '''
         Returns user.name from the underlying git repo. Used to note who 
         created or modified an entry.
         '''
 
-        return self._run_subprocess_command(["git", "config", "user.name"], 
+        self.user = self._run_subprocess_command(["git", "config", "user.name"], 
                 cwd=self.repo_path)
+        return self.user
+
+
+    def whoami(self):
+        '''
+        wrapper of _whoami
+        '''
+
+        return self.user
 
     def remove(self, entry):
         '''
@@ -669,7 +688,7 @@ class GitLog(object):
         '''
         Pushes the actual state from the underlying git repo.
         '''
-        print(self._run_subprocess_command(["git", "pull"], cwd=self.repo_path))
+        self.pull()
         print(self._run_subprocess_command(["git", "push"], cwd=self.repo_path))
 
     def add_key_to_know_hosts(self, repo_uri):
@@ -685,7 +704,7 @@ class GitLog(object):
                 lines.append(k)
 
         with open(hosts_file, "w") as f:
-            f.write('\n'.join(lines))
+            f.write('\n'.join(lines)+'\n')
 
 
     def set_config(self, user, email, repo_uri):
@@ -744,6 +763,15 @@ class GitLog(object):
     def get_actual_repo_uri(self):
         return self.repo_uri
 
+    def get_key_pub(self):
+        return self.key_pub
+
+    def _get_key_pub(self):
+        self.ssh_pub_key_path = os.path.join(self.home, ".ssh/id_rsa.pub")
+        with open(self.ssh_pub_key_path, 'r') as f:
+            self.key_pub = f.read()
+        return self.key_pub
+
 
 '''
 Implementation of extension's UI.
@@ -764,11 +792,17 @@ class BurpUi(ITab):
         # Create split pane with top and bottom panes
 
         self._splitpane = JSplitPane(JSplitPane.VERTICAL_SPLIT)
-        self.bottom_pane = UiBottomPane(callbacks, log)
-        self.top_pane = UiTopPane(callbacks, self.bottom_pane, log)
-        self.bottom_pane.setLogTable(self.top_pane.logTable)
+        self._splitpane2 = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
+        # self.bottom_pane = UiBottomPane(callbacks, log)
+        self.bottom_pane1 = UiBottomPane1(callbacks, log)
+        self.bottom_pane2 = UiBottomPane2(callbacks, log)
+        self.top_pane = UiTopPane(callbacks, self.bottom_pane2, log)
+        self.bottom_pane1.setLogTable(self.top_pane.logTable)
+        self.bottom_pane2.setLogTable(self.top_pane.logTable)
         self._splitpane.setLeftComponent(self.top_pane)
-        self._splitpane.setRightComponent(self.bottom_pane)
+        self._splitpane.setRightComponent(self._splitpane2)
+        self._splitpane2.setLeftComponent(self.bottom_pane1)
+        self._splitpane2.setRightComponent(self.bottom_pane2)
 
 
         # Create right-click handler
@@ -855,7 +889,7 @@ class RightClickHandler(IContextMenuFactory):
             for message in self.invocation.getSelectedMessages():
                 self.log.add_repeater_entry(message) 
 
-class UiBottomPane(JTabbedPane, IMessageEditorController):
+class UiBottomPane1(JTabbedPane, IMessageEditorController):
     '''
     The bottom pane in the this extension's UI tab. It shows detail of 
     whatever is selected in the top pane.
@@ -863,11 +897,72 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
 
     def __init__(self, callbacks, log):
         self.configPanel = ConfigPanel(callbacks, log)
-        self.addTab("Git Config", self.configPanel)
-        self.commandPanel = CommandPanel(callbacks, log)
-        self.addTab("Git Commands", self.commandPanel)
-        self.editPanel = EntryEditPanel(callbacks, log)
+        self.addTab("Config & Commands", self.configPanel)
+        # self.commandPanel = CommandPanel(callbacks, log)
+        # self.addTab("Git Commands", self.commandPanel)
+        # self.editPanel = EntryEditPanel(callbacks, log)
         # self.addTab("Entry edit", self.editPanel)
+        self._requestViewer = callbacks.createMessageEditor(self, False)
+        self._responseViewer = callbacks.createMessageEditor(self, False)
+        self._issueViewer = callbacks.createMessageEditor(self, False)
+        callbacks.customizeUiComponent(self)
+
+    def setLogTable(self, log_table):
+        '''
+        Passes the Log table to the "Send to Tools" component so it can grab
+        the selected rows
+        '''
+        # self.commandPanel.log_table = log_table
+        # self.editPanel.log_table = log_table
+        self.configPanel.log_table = log_table
+
+    def show_log_entry(self, log_entry):
+        '''
+        Shows the log entry in the bottom pane of the UI
+        '''
+
+        self.removeAll()
+        self.addTab("Commands & Config", self.configPanel)
+        self._currentlyDisplayedItem = log_entry
+
+    def getScanIssueSummary(self, log_entry):
+        '''
+        A quick hack to generate a plaintext summary of a Scanner issue. 
+        This is shown in the bottom pane of the Git Bridge tab when a Scanner 
+        item is selected.
+        '''
+
+        out = []
+        for key, val in sorted(log_entry.__dict__.items()):
+            if key in ["messages", "tool", "md5"]:
+                continue
+            out.append("%s: %s" % (key, val))
+        return "\n\n".join(out)
+        
+    '''
+    The three methods below implement IMessageEditorController st. requests 
+    and responses are shown in the UI pane
+    '''
+
+    def getHttpService(self):
+        return self._currentlyDisplayedItem.requestResponse.getHttpService()
+
+    def getRequest(self):
+        return self._currentlyDisplayedItem.requestResponse.getRequest()
+
+    def getResponse(self):
+        return self._currentlyDisplayedItem.getResponse()
+
+class UiBottomPane2(JTabbedPane, IMessageEditorController):
+    '''
+    The bottom pane in the this extension's UI tab. It shows detail of 
+    whatever is selected in the top pane.
+    '''
+
+    def __init__(self, callbacks, log):
+        self.commandPanel = CommandPanel(callbacks, log)
+        self.editPanel = EntryEditPanel(callbacks, log)
+        self.addTab("Entry edit", self.editPanel)
         self._requestViewer = callbacks.createMessageEditor(self, False)
         self._responseViewer = callbacks.createMessageEditor(self, False)
         self._issueViewer = callbacks.createMessageEditor(self, False)
@@ -880,7 +975,6 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
         '''
         self.commandPanel.log_table = log_table
         self.editPanel.log_table = log_table
-        self.configPanel.log_table = log_table
 
     def show_log_entry(self, log_entry):
         '''
@@ -888,9 +982,6 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
         '''
 
         self.removeAll()
-        self.addTab("Git Config", self.configPanel)
-        self.addTab("Git Commands", self.commandPanel)
-        self.addTab("Entry Edit", self.editPanel)
         if getattr(log_entry, "request", False):
             self.addTab("Request", self._requestViewer.getComponent())
             self._requestViewer.setMessage(log_entry.request, True)
@@ -901,6 +992,7 @@ class UiBottomPane(JTabbedPane, IMessageEditorController):
             self.addTab("Issue Summary", self._issueViewer.getComponent())
             self._issueViewer.setMessage(self.getScanIssueSummary(log_entry), 
                     False)
+        self.addTab("Entry Edit", self.editPanel)
         self._currentlyDisplayedItem = log_entry
 
     def getScanIssueSummary(self, log_entry):
@@ -1026,7 +1118,7 @@ class EntryEditPanel(JPanel, ActionListener):
 
 class ConfigPanel(JPanel, ActionListener):
     '''
-    This is the "Git Bridge Commands" Panel shown in the bottom of the Git
+    This is the "Config & Commands" Panel shown in the bottom of the Git
     Bridge tab.
     '''
 
@@ -1034,8 +1126,42 @@ class ConfigPanel(JPanel, ActionListener):
         self.callbacks = callbacks
         self.log = log
         self.log_table = None # to be set by caller
-        # self.log.reload()
+
+        self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
+
+
+        # Command Button line
+        boxHorizontal = Box.createHorizontalBox()
+        button = JButton("Refresh")
+        button.addActionListener(CommandPanel.ReloadAction(log))
+        boxHorizontal.add(button)
+
+        button = JButton("Send to Tool")
+        button.addActionListener(CommandPanel.SendAction(self))
+        boxHorizontal.add(button)
+        
+        button = JButton("Git Remove Force")
+        button.addActionListener(CommandPanel.RemoveAction(self, log))
+        boxHorizontal.add(button)
+
+        button = JButton("Git Remove Safe")
+        button.addActionListener(CommandPanel.RemoveSafeAction(self, log))
+        boxHorizontal.add(button)
+        
+        button = JButton("Git Pull")
+        button.addActionListener(CommandPanel.PullAction(log, callbacks))
+        boxHorizontal.add(button)
+        
+        button = JButton("Git Push")
+        button.addActionListener(CommandPanel.PushAction(log, callbacks))
+        boxHorizontal.add(button)
+        self.add(boxHorizontal)
+
+
+        
+        # Config section
         self.repo = self.log.get_actual_repo_uri()
+        self.key_pub = self.log.get_key_pub()
         try:
             self.email = callbacks.loadExtensionSetting("git_email")
         except:
@@ -1044,8 +1170,6 @@ class ConfigPanel(JPanel, ActionListener):
             self.name = callbacks.loadExtensionSetting("git_name")
         except:
             self.name = ""
-
-        self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
 
         to_disable = []
 
@@ -1071,6 +1195,13 @@ class ConfigPanel(JPanel, ActionListener):
         self.add(boxHorizontal)
 
         boxHorizontal = Box.createHorizontalBox()
+        self.key_pub_box = JTextField('', 10)
+        self.key_pub_box.setText(self.key_pub)
+        boxHorizontal.add(JLabel("  Copy your ~/.ssh/id_rsa.pub: "))
+        boxHorizontal.add(self.key_pub_box)
+        self.add(boxHorizontal)
+
+        boxHorizontal = Box.createHorizontalBox()
         button = JButton("Set and Reload")
         button.addActionListener(ConfigPanel.SetConfigAction(log, callbacks, self.user_box, self.email_box, self.repo_box))
         boxHorizontal.add(JLabel("Set, save and reload values:"))
@@ -1086,20 +1217,104 @@ class ConfigPanel(JPanel, ActionListener):
         self.add(boxHorizontal)
         to_disable.append(button)
 
-        # to_disable.append(self.user_box)
-        # to_disable.append(self.email_box)
-        # to_disable.append(self.repo_box)
-        # for item in to_disable:
-        #     item.setVisible(False)
-        # self.revalidate()
-        # self.repaint()
+    class ReloadAction(ActionListener):
+        '''
+        Handles when the "Reload" button is clicked.
+        '''
 
-        # boxHorizontal = Box.createHorizontalBox()
-        # button = JButton("Reload Actual Project Config")
-        # button.addActionListener(ConfigPanel.ReloadActualProjectAction(log, self.repo_box, to_disable, self))
-        # boxHorizontal.add(JLabel("Because we cannot get actual project, maybe you want to reload:"))
-        # boxHorizontal.add(button)
-        # self.add(boxHorizontal)
+        def __init__(self, log):
+            self.log = log
+    
+        def actionPerformed(self, event):
+            self.log.reload()
+
+    class SendAction(ActionListener):
+        '''
+        Handles when the "Send to Tools" button is clicked.
+        '''
+
+        def __init__(self, panel):
+            self.panel = panel
+
+        def actionPerformed(self, actionEvent):
+            '''
+            Iterates over each entry that is selected in the UI table and 
+            calls the proper Burp "send to" callback with the entry data.
+            '''
+
+            for entry in self.panel.log_table.getSelectedEntries():
+                if entry.tool == "repeater":
+                    https = (entry.protocol == "https")
+                    self.panel.callbacks.sendToRepeater(entry.host, 
+                            int(entry.port), https, entry.request, 
+                            entry.timestamp)
+                elif entry.tool == "scanner":
+                    issue = BurpLogScanIssue(entry)
+                    self.panel.callbacks.addScanIssue(issue)
+
+    class RemoveAction(ActionListener):
+        '''
+        Handles when the "Remove Force" button is clicked.
+        '''
+
+        def __init__(self, panel, log):
+            self.panel = panel
+            self.log = log
+
+        def actionPerformed(self, event):
+            '''
+            Iterates over each entry that is selected in the UI table and 
+            removes it from the Log. 
+            '''
+            entries = self.panel.log_table.getSelectedEntries()
+            for entry in entries:
+                self.log.remove(entry)
+
+    class RemoveSafeAction(ActionListener):
+        '''
+        Handles when the "Remove Safe" button is clicked.
+        '''
+
+        def __init__(self, panel, log):
+            self.panel = panel
+            self.log = log
+
+        def actionPerformed(self, event):
+            '''
+            Iterates over each entry that is selected in the UI table and 
+            removes it from the Log. 
+            '''
+            entries = self.panel.log_table.getSelectedEntries()
+            for entry in entries:
+                if self.log.git_log.whoami()  == entry.who:
+                    self.log.remove(entry)
+                else:
+                    print("cannot safe remove other people entries.")
+
+    class PullAction(ActionListener):
+        '''
+        Handles when the "Pull to repo" button is clicked.
+        '''
+
+        def __init__(self, log, callbacks):
+            self.log = log
+            self._callbacks = callbacks
+    
+        def actionPerformed(self, event):
+            self.log.pull()
+            self.log.reload()
+            
+    class PushAction(ActionListener):
+        '''
+        Handles when the "Push to repo" button is clicked.
+        '''
+
+        def __init__(self, log, callbacks):
+            self.log = log
+            self._callbacks = callbacks
+    
+        def actionPerformed(self, event):
+            self.log.push()
 
 
     class SetConfigAction(ActionListener):
@@ -1169,45 +1384,52 @@ class CommandPanel(JPanel, ActionListener):
         self.setLayout(BoxLayout(self, BoxLayout.PAGE_AXIS))
 
         boxHorizontal = Box.createHorizontalBox()
-        label = JLabel("Reload from Git Repo:")
-        button = JButton("Reload")
+        # label = JLabel("Reload from Git Repo:")
+        button = JButton("Refresh")
         button.addActionListener(CommandPanel.ReloadAction(log))
-        boxHorizontal.add(label)
+        # boxHorizontal.add(label)
         boxHorizontal.add(button)
-        self.add(boxHorizontal)
+        # self.add(boxHorizontal)
 
-        boxHorizontal = Box.createHorizontalBox()
-        label = JLabel("Send selected entries to respective Burp tools:")
-        button = JButton("Send")
+        # boxHorizontal = Box.createHorizontalBox()
+        # label = JLabel("Send selected entries to respective Burp tools:")
+        button = JButton("Send to Tool")
         button.addActionListener(CommandPanel.SendAction(self))
-        boxHorizontal.add(label)
+        # boxHorizontal.add(label)
         boxHorizontal.add(button)
-        self.add(boxHorizontal)
+        # self.add(boxHorizontal)
 
-        boxHorizontal = Box.createHorizontalBox()
-        label = JLabel("Remove selected entries from Git Repo:")
-        button = JButton("Remove")
+        # boxHorizontal = Box.createHorizontalBox()
+        # label = JLabel("Remove selected entries from Git Repo:")
+        button = JButton("Git Remove Force")
         button.addActionListener(CommandPanel.RemoveAction(self, log))
-        boxHorizontal.add(label)
+        # boxHorizontal.add(label)
         boxHorizontal.add(button)
-        self.add(boxHorizontal)
+        # self.add(boxHorizontal)
 
         # TODO: maybe add a git command box
         
-
-        boxHorizontal = Box.createHorizontalBox()
-        label = JLabel("Pull to Git Repo:")
-        button = JButton("Pull")
-        button.addActionListener(CommandPanel.PullAction(log, callbacks))
-        boxHorizontal.add(label)
+        # boxHorizontal = Box.createHorizontalBox()
+        # label = JLabel("Remove Safe selected entries from Git Repo:")
+        button = JButton("Git Remove Safe")
+        button.addActionListener(CommandPanel.RemoveSafeAction(self, log))
+        # boxHorizontal.add(label)
         boxHorizontal.add(button)
-        self.add(boxHorizontal)
+        # self.add(boxHorizontal)
 
-        boxHorizontal = Box.createHorizontalBox()
-        label = JLabel("Push to Git Repo:")
-        button = JButton("Push")
+        # boxHorizontal = Box.createHorizontalBox()
+        # label = JLabel("Pull to Git Repo:")
+        button = JButton("Git Pull")
+        button.addActionListener(CommandPanel.PullAction(log, callbacks))
+        # boxHorizontal.add(label)
+        boxHorizontal.add(button)
+        # self.add(boxHorizontal)
+
+        # boxHorizontal = Box.createHorizontalBox()
+        # label = JLabel("Push to Git Repo:")
+        button = JButton("Git Push")
         button.addActionListener(CommandPanel.PushAction(log, callbacks))
-        boxHorizontal.add(label)
+        # boxHorizontal.add(label)
         boxHorizontal.add(button)
         self.add(boxHorizontal)
 
@@ -1248,7 +1470,7 @@ class CommandPanel(JPanel, ActionListener):
 
     class RemoveAction(ActionListener):
         '''
-        Handles when the "Remove" button is clicked.
+        Handles when the "Remove Force" button is clicked.
         '''
 
         def __init__(self, panel, log):
@@ -1263,6 +1485,27 @@ class CommandPanel(JPanel, ActionListener):
             entries = self.panel.log_table.getSelectedEntries()
             for entry in entries:
                 self.log.remove(entry)
+
+    class RemoveSafeAction(ActionListener):
+        '''
+        Handles when the "Remove Safe" button is clicked.
+        '''
+
+        def __init__(self, panel, log):
+            self.panel = panel
+            self.log = log
+
+        def actionPerformed(self, event):
+            '''
+            Iterates over each entry that is selected in the UI table and 
+            removes it from the Log. 
+            '''
+            entries = self.panel.log_table.getSelectedEntries()
+            for entry in entries:
+                if self.log.git_log.whoami()  == entry.who:
+                    self.log.remove(entry)
+                else:
+                    print("cannot safe remove other people entries.")
 
     class PullAction(ActionListener):
         '''
