@@ -694,10 +694,12 @@ class GitLog(object):
     def add_key_to_know_hosts(self, repo_uri):
         server = repo_uri.split('@')[1].split(':')[0]
         keys = self._run_subprocess_command(["ssh-keyscan", server]).decode()
-        hosts_file = os.path.join(self.home, ".ssh/known_hosts")
+        hosts_file = os.path.join(self.home, ".ssh", "known_hosts")
 
-        with open(hosts_file, "r") as f:
-            lines = f.read().split('\n')
+        lines = []
+        if os.path.exists(hosts_file):
+            with open(hosts_file, "r") as f:
+                lines = f.read().split('\n')
         
         for k in keys.split('\n'):
             if not k in lines:
