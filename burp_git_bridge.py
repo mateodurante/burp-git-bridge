@@ -368,6 +368,7 @@ class GuiLog(AbstractTableModel):
         '''
         Gets the LogEntry at rowIndex
         '''
+        l = self._log.get(rowIndex)
         return self._log.get(rowIndex)
     
     def getValueAt(self, rowIndex, columnIndex):
@@ -1056,15 +1057,15 @@ class UiLogTable(JTable):
         callbacks.customizeUiComponent(self)
 
     def getSelectedEntries(self):
-        return [self.gui_log.get(i) for i in self.getSelectedRows()]
+        return [self.gui_log.get(self.convertRowIndexToModel(i)) for i in self.getSelectedRows()]
     
     def changeSelection(self, row, col, toggle, extend):
         '''
         Displays the selected item in the content pane
         '''
-    
+        
         JTable.changeSelection(self, row, col, toggle, extend)
-        self.bottom_pane.show_log_entry(self.gui_log.get(row))
+        self.bottom_pane.show_log_entry(self.gui_log.get(self.convertRowIndexToModel(row)))
 
 class EntryEditPanel(JPanel, ActionListener):
     '''
